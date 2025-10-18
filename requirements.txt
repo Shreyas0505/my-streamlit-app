@@ -5,3 +5,5 @@ opencv-python-headless
 numpy
 av
 pillow
+pandas
+plotly
