@@ -1,6 +1,7 @@
 streamlit
-numpy
+streamlit-webrtc
 tensorflow
-opencv-python
-pandas
-plotly
+opencv-python-headless
+numpy
+av
+pillow
