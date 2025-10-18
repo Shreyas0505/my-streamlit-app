@@ -16,6 +16,11 @@ from collections import Counter
 # Suppress warnings
 logging.getLogger("tensorflow").setLevel(logging.CRITICAL)
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+logging.getLogger("opencv").setLevel(logging.CRITICAL)
+
+# Suppress OpenCV camera warnings
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning)
 
 # Page config
 st.set_page_config(
@@ -43,8 +48,8 @@ st.markdown("Real-time emotion detection with data visualization and storage")
 
 # --- SIDEBAR SETTINGS ---
 st.sidebar.header("⚙️ Settings")
-model_path = st.sidebar.text_input("Model Path", "model(3).h5")
-cascade_path = st.sidebar.text_input("Cascade Classifier Path", "haarcascade_frontalface_default.xml")
+model_path = st.sidebar.text_input("Model Path", "/home/shreyas/Downloads/model(3).h5")
+cascade_path = st.sidebar.text_input("Cascade Classifier Path", "/home/shreyas/Downloads/haarcascade_frontalface_default.xml")
 
 # Camera mode selection
 st.sidebar.markdown("---")
