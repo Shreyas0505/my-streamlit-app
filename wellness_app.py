@@ -43,7 +43,7 @@ st.markdown("Real-time emotion detection with data visualization and storage")
 
 # --- SIDEBAR SETTINGS ---
 st.sidebar.header("⚙️ Settings")
-model_path = st.sidebar.text_input("Model Path", "/home/shreyas/Downloads/model(3).h5")
+model_path = st.sidebar.text_input("Model Path", "model(3).h5")
 cascade_path = st.sidebar.text_input("Cascade Classifier Path", "haarcascade_frontalface_default.xml")
 
 # Session history storage
