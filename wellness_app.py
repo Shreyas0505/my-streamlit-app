@@ -13,9 +13,19 @@ import plotly.graph_objects as go
 import plotly.express as px
 from collections import Counter
 
+# --- WebRTC Imports ---
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
+import av
+
 # Suppress warnings
 logging.getLogger("tensorflow").setLevel(logging.CRITICAL)
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+# --- WebRTC Configuration ---
+# Use Google's public STUN server for ICE negotiation
+RTC_CONFIGURATION = RTCConfiguration(
+    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+)
 
 # Page config
 st.set_page_config(
@@ -34,12 +44,16 @@ st.markdown("""
         background-color: rgba(255,255,255,0.1);
         padding: 10px;
         border-radius: 10px;
+        color: white; /* Ensure text is visible on gradient */
+    }
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 1rem;
     }
     </style>
     """, unsafe_allow_html=True)
 
 st.title("🩺 Wellness Emotion Detection & Analytics")
-st.markdown("Real-time emotion detection with data visualization and storage")
+st.markdown("Real-time emotion detection with data visualization and storage, powered by WebRTC.")
 
 # --- SIDEBAR SETTINGS ---
 st.sidebar.header("⚙️ Settings")
@@ -63,11 +77,8 @@ class NumpyEncoder(json.JSONEncoder):
 
 # Load cascade classifier
 @st.cache_resource
-def load_cascade():
-    cascade = cv2.CascadeClassifier(cascade_path)
-    if cascade.empty():
-        st.error(f"Error loading cascade classifier from: {cascade_path}")
-        return None
+def load_cascade(path):
+    cascade = cv2.CascadeClassifier(path)
     return cascade
 
 # Load emotion model
@@ -77,21 +88,23 @@ def load_emotion_model(path):
         model = load_model(path)
         return model
     except Exception as e:
-        st.error(f"Error loading model: {e}")
         return None
 
 # Load resources
-face_classifier = load_cascade()
+face_classifier = load_cascade(cascade_path)
 classifier = load_emotion_model(model_path)
 emotion_labels = ['Angry', 'Disgust', 'Fear', 'Happy', 'Neutral', 'Sad', 'Surprise']
 
-if face_classifier is None or classifier is None:
-    st.error("Please ensure the model path and cascade classifier path are correct.")
+if face_classifier.empty() or classifier is None:
+    if face_classifier.empty():
+        st.error(f"❌ Error loading cascade classifier from: {cascade_path}. Check file path.")
+    if classifier is None:
+        st.error(f"❌ Error loading Keras model from: {model_path}. Check file path.")
     st.stop()
 
 # Emotion detection function
 def detect_emotion(frame):
-    """Detect emotions in frame"""
+    """Detect emotions in frame. Frame is expected in BGR format."""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     faces = face_classifier.detectMultiScale(gray, scaleFactor=1.3, minNeighbors=5)
     
@@ -117,7 +130,7 @@ def detect_emotion(frame):
             
             label_position = (x, y - 10)
             cv2.putText(frame, f"{emotion}", label_position,
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             
             detections.append({
                 'emotion': emotion,
@@ -127,12 +140,30 @@ def detect_emotion(frame):
     
     return frame, detections
 
-# Initialize session state
-if 'recording' not in st.session_state:
-    st.session_state.recording = False
+# --- WebRTC Frame Processing Callback ---
+def process_frame(frame: av.VideoFrame):
+    """Callback function that receives video frames from WebRTC stream."""
+    # Convert incoming AV frame to NumPy array (BGR format for OpenCV)
+    img = frame.to_ndarray(format="bgr24")
+    
+    # Perform emotion detection using existing function
+    frame_with_detections, detections = detect_emotion(img)
+
+    # Save detections to session state. This automatically updates the stats column (col2).
+    # We only record if the session_start timestamp has been set (i.e., the user clicked the button).
+    if st.session_state.get('session_start'):
+        for detection in detections:
+            st.session_state.emotion_data.append(detection)
+    
+    # Convert the processed NumPy array back to an AV frame for display
+    return av.VideoFrame.from_ndarray(frame_with_detections, format="bgr24")
+
+
+# Initialize session state (removed 'recording' state as WebRTC handles it)
+if 'emotion_data' not in st.session_state:
     st.session_state.emotion_data = []
     st.session_state.session_start = None
-    st.session_state.frame_count = 0
+    st.session_state.frame_count = 0 # Keeping this for potential future optimizations (e.g., frame skipping)
 
 # TABS
 tab1, tab2, tab3 = st.tabs(["📹 Live Detection", "📊 View Sessions", "📈 Analytics"])
@@ -144,60 +175,26 @@ with tab1:
     with col1:
         st.subheader("Live Emotion Detection Feed")
         
-        col_start, col_stop, col_reset = st.columns(3)
+        # This button is used to initialize/reset the recording session data
+        if st.button("▶️ Start/Reset Session Data", use_container_width=True, key="start_live"):
+            st.session_state.emotion_data = []
+            st.session_state.session_start = datetime.now()
+            st.session_state.frame_count = 0
+            st.info("✅ Session data tracking started. The WebRTC stream is now live.")
+
+        st.info("Click the 'Start' button in the stream below and grant camera access to begin detection.")
         
-        with col_start:
-            if st.button("▶️ Start Recording", use_container_width=True, key="start_btn"):
-                st.session_state.recording = True
-                st.session_state.emotion_data = []
-                st.session_state.session_start = datetime.now()
-                st.session_state.frame_count = 0
-                st.rerun()
-        
-        with col_stop:
-            if st.button("⏹️ Stop Recording", use_container_width=True, key="stop_btn"):
-                st.session_state.recording = False
-                st.rerun()
-        
-        with col_reset:
-            if st.button("🔄 Clear Data", use_container_width=True, key="reset_btn"):
-                st.session_state.emotion_data = []
-                st.session_state.session_start = None
-                st.rerun()
-        
-        frame_placeholder = st.empty()
-        status_placeholder = st.empty()
-        
-        if st.session_state.recording:
-            cap = cv2.VideoCapture(0)
-            
-            if not cap.isOpened():
-                st.error("❌ Cannot open webcam. Check if camera is connected.")
-            else:
-                status_placeholder.success("🟢 Recording... Detecting emotions in real-time")
-                
-                while st.session_state.recording:
-                    ret, frame = cap.read()
-                    
-                    if not ret:
-                        st.error("Failed to read from camera")
-                        break
-                    
-                    frame = cv2.flip(frame, 1)
-                    frame_with_detections, detections = detect_emotion(frame)
-                    
-                    for detection in detections:
-                        st.session_state.emotion_data.append(detection)
-                    
-                    frame_rgb = cv2.cvtColor(frame_with_detections, cv2.COLOR_BGR2RGB)
-                    frame_placeholder.image(frame_rgb, use_container_width=True)
-                    
-                    st.session_state.frame_count += 1
-                
-                cap.release()
-        else:
-            status_placeholder.info("⏸️ Ready to record. Click 'Start Recording' to begin.")
-    
+        # WebRTC Streamer component
+        webrtc_streamer(
+            key="emotion_stream",
+            mode=WebRtcMode.SENDRECV, # Send video frames to Python and receive processed frames back
+            rtc_configuration=RTC_CONFIGURATION,
+            video_frame_callback=process_frame,
+            media_stream_constraints={"video": True, "audio": False}, # Only use video
+        )
+        # Note: The WebRTC component runs continuously once started by the user in the browser.
+        # The data logging is controlled by checking if st.session_state.session_start is set in process_frame.
+
     with col2:
         st.subheader("📊 Live Stats")
         
@@ -213,13 +210,14 @@ with tab1:
             for emotion in emotion_labels:
                 count = emotion_counts.get(emotion, 0)
                 pct = (count / total_detections * 100) if total_detections > 0 else 0
-                st.write(f"• {emotion}: {count} ({pct:.1f}%)")
+                st.write(f"• {emotion}: **{count}** ({pct:.1f}%)")
             
             if st.button("💾 Save Current Session", use_container_width=True, key="save_session"):
                 if st.session_state.emotion_data:
                     session_file = HISTORY_DIR / f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
                     session_data = {
-                        'session_start': st.session_state.session_start.isoformat() if st.session_state.session_start else None,
+                        # Use get to handle cases where start might be None
+                        'session_start': st.session_state.session_start.isoformat() if st.session_state.session_start else "N/A",
                         'session_end': datetime.now().isoformat(),
                         'total_detections': total_detections,
                         'emotion_counts': dict(emotion_counts),
@@ -227,11 +225,16 @@ with tab1:
                     }
                     with open(session_file, 'w') as f:
                         json.dump(session_data, f, indent=2, cls=NumpyEncoder)
-                    st.success(f"✅ Session saved!\n{session_file.name}")
+                    st.success(f"✅ Session saved as: {session_file.name}")
+                    st.session_state.emotion_data = [] # Clear live data after saving
+                    st.session_state.session_start = None
+                    st.rerun()
+                else:
+                    st.warning("Cannot save: No detections recorded in the current session.")
         else:
-            st.info("No data yet. Start recording to see stats.")
+            st.info("No data yet. Start the camera and click the 'Start/Reset Session Data' button to begin tracking.")
 
-# ============ TAB 2: VIEW SESSIONS ============
+# ============ TAB 2: VIEW SESSIONS (Unchanged Logic) ============
 with tab2:
     st.subheader("📋 All Saved Sessions")
     
@@ -274,61 +277,68 @@ with tab2:
                     st.metric("🎭 Top Emotion", "N/A")
             
             with col3:
-                st.metric("📅 Session Date", selected_session.stem.split('_')[1][:8])
+                # Calculate Duration
+                start_time_str = session_data.get('session_start')
+                end_time_str = session_data.get('session_end')
+                duration_str = "N/A"
+                if start_time_str and end_time_str and start_time_str != "N/A":
+                    try:
+                        start_time = datetime.fromisoformat(start_time_str)
+                        end_time = datetime.fromisoformat(end_time_str)
+                        duration = end_time - start_time
+                        # Format to HH:MM:SS, dropping microseconds
+                        duration_str = str(duration).split('.')[0]
+                    except ValueError:
+                        pass # Keep N/A if datetime parsing fails
+                
+                st.metric("⏱️ Duration", duration_str)
             
             with col4:
-                st.metric("⏱️ Total Records", len(detections))
+                st.metric("📅 Session Date", selected_session.stem.split('_')[1][:8])
             
             # Emotion breakdown
+            st.markdown("---")
             st.markdown("**Emotion Distribution:**")
             emotion_df = pd.DataFrame([
                 {'Emotion': emotion, 'Count': emotion_counts.get(emotion, 0)}
                 for emotion in emotion_labels
             ])
             
-            col1, col2 = st.columns(2)
+            col_bar, col_pie = st.columns(2)
             
-            with col1:
+            # Define color map for consistency
+            color_map = {
+                'Angry': '#FF4444', 'Disgust': '#FF8C00', 'Fear': '#8B008B',
+                'Happy': '#FFD700', 'Neutral': '#808080', 'Sad': '#4169E1',
+                'Surprise': '#FF1493'
+            }
+            
+            with col_bar:
                 fig_bar = px.bar(
                     emotion_df,
                     x='Emotion',
                     y='Count',
                     color='Emotion',
-                    color_discrete_map={
-                        'Angry': '#FF4444',
-                        'Disgust': '#FF8C00',
-                        'Fear': '#8B008B',
-                        'Happy': '#FFD700',
-                        'Neutral': '#808080',
-                        'Sad': '#4169E1',
-                        'Surprise': '#FF1493'
-                    },
+                    color_discrete_map=color_map,
                     title="Emotion Frequency"
                 )
                 st.plotly_chart(fig_bar, use_container_width=True)
             
-            with col2:
+            with col_pie:
                 fig_pie = px.pie(
                     emotion_df[emotion_df['Count'] > 0],
                     values='Count',
                     names='Emotion',
                     color='Emotion',
-                    color_discrete_map={
-                        'Angry': '#FF4444',
-                        'Disgust': '#FF8C00',
-                        'Fear': '#8B008B',
-                        'Happy': '#FFD700',
-                        'Neutral': '#808080',
-                        'Sad': '#4169E1',
-                        'Surprise': '#FF1493'
-                    },
+                    color_discrete_map=color_map,
                     title="Emotion Breakdown"
                 )
                 st.plotly_chart(fig_pie, use_container_width=True)
             
             # Timeline
             if detections:
-                st.markdown("**Emotion Timeline:**")
+                st.markdown("---")
+                st.markdown("**Emotion Timeline:** (Note: This uses detection index as a proxy for time)")
                 
                 # Create timeline data
                 timeline_data = []
@@ -358,7 +368,7 @@ with tab2:
                 ))
                 
                 fig_timeline.update_layout(
-                    title="Emotion Progression",
+                    title="Emotion Progression Over Session",
                     xaxis_title="Detection #",
                     yaxis_title="Emotion",
                     hovermode='x unified',
@@ -372,7 +382,8 @@ with tab2:
                 st.plotly_chart(fig_timeline, use_container_width=True)
             
             # Session info
-            st.markdown("**Session Information:**")
+            st.markdown("---")
+            st.markdown("**Session Metadata:**")
             info_col1, info_col2 = st.columns(2)
             
             with info_col1:
@@ -382,9 +393,9 @@ with tab2:
             with info_col2:
                 st.write(f"**File:** {selected_session.name}")
     else:
-        st.info("No saved sessions yet. Start recording to create one!")
+        st.info("No saved sessions yet. Start the camera and track a session in the 'Live Detection' tab to create one!")
 
-# ============ TAB 3: ANALYTICS ============
+# ============ TAB 3: ANALYTICS (Unchanged Logic) ============
 with tab3:
     st.subheader("📈 Overall Analytics")
     
@@ -412,10 +423,15 @@ with tab3:
             emotion_counts = session_data.get('emotion_counts', {})
             total_detections = sum(emotion_counts.values())
             
+            top_emotion = max(emotion_counts, key=emotion_counts.get) if emotion_counts else 'N/A'
+            
+            # Clean up session name for display
+            session_name = session_file.stem.replace("session_", "").replace("_", " ")
+            
             all_sessions_data.append({
-                'Session': session_file.stem,
+                'Session ID': session_name,
                 'Total Detections': total_detections,
-                'Top Emotion': max(emotion_counts, key=emotion_counts.get) if emotion_counts else 'N/A'
+                'Top Emotion': top_emotion
             })
             
             for emotion, count in emotion_counts.items():
@@ -439,9 +455,10 @@ with tab3:
                 st.metric("🎭 Most Common", "N/A")
         
         with col4:
-            st.metric("📈 Avg/Session", len(all_emotions) // len(valid_sessions) if valid_sessions else 0)
+            st.metric("📈 Avg Detections/Session", len(all_emotions) // len(valid_sessions) if valid_sessions else 0)
         
         # Overall emotion distribution
+        st.markdown("---")
         st.markdown("**Overall Emotion Distribution:**")
         
         emotion_counter = Counter(all_emotions)
@@ -450,48 +467,33 @@ with tab3:
             for emotion in emotion_labels
         ])
         
-        col1, col2 = st.columns(2)
+        col_bar_overall, col_pie_overall = st.columns(2)
         
-        with col1:
+        with col_bar_overall:
             fig_overall_bar = px.bar(
                 overall_df,
                 x='Emotion',
                 y='Count',
                 color='Emotion',
-                color_discrete_map={
-                    'Angry': '#FF4444',
-                    'Disgust': '#FF8C00',
-                    'Fear': '#8B008B',
-                    'Happy': '#FFD700',
-                    'Neutral': '#808080',
-                    'Sad': '#4169E1',
-                    'Surprise': '#FF1493'
-                },
+                color_discrete_map=color_map,
                 title="Overall Emotion Frequency"
             )
             st.plotly_chart(fig_overall_bar, use_container_width=True)
         
-        with col2:
+        with col_pie_overall:
             fig_overall_pie = px.pie(
                 overall_df[overall_df['Count'] > 0],
                 values='Count',
                 names='Emotion',
                 color='Emotion',
-                color_discrete_map={
-                    'Angry': '#FF4444',
-                    'Disgust': '#FF8C00',
-                    'Fear': '#8B008B',
-                    'Happy': '#FFD700',
-                    'Neutral': '#808080',
-                    'Sad': '#4169E1',
-                    'Surprise': '#FF1493'
-                },
+                color_discrete_map=color_map,
                 title="Overall Emotion Breakdown"
             )
             st.plotly_chart(fig_overall_pie, use_container_width=True)
         
         # Sessions table
-        st.markdown("**Session History:**")
+        st.markdown("---")
+        st.markdown("**Session History Table:**")
         sessions_df = pd.DataFrame(all_sessions_data)
         st.dataframe(sessions_df, use_container_width=True)
     else:
@@ -501,8 +503,9 @@ with tab3:
 st.markdown("---")
 st.markdown("""
 **Wellness Emotion Detection System**
-- Real-time emotion detection with Haar Cascade & CNN
-- Automatic data storage in JSON format
-- Interactive visualizations with Plotly
-- 7 Emotions: Angry, Disgust, Fear, Happy, Neutral, Sad, Surprise
+- **Real-time Camera Feed** using WebRTC for robust cross-platform performance.
+- Real-time emotion detection with Haar Cascade & CNN.
+- Automatic data storage in JSON format.
+- Interactive visualizations with Plotly.
+- 7 Emotions: Angry, Disgust, Fear, Happy, Neutral, Sad, Surprise.
 """)
