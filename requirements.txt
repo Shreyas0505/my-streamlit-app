@@ -7,3 +7,5 @@ av
 pillow
 pandas
 plotly
+keras
+Pillow
